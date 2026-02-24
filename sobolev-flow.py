@@ -1,9 +1,4 @@
-# Manifest
-#
-# The purpose of this file is to perform a FEM for the classic curvature flow
-# straight classic style
-#
-# Easy right?
+# The purpose of this file is to perform a FEM for the Sobolev Gradient Flow
 #
 # Written by Jonas Kew
 #
@@ -24,16 +19,18 @@ outfile = TemporaryFile()
 
 start = time.time()
 # GLOBAL VARS
-n = 100 # our square works for 45
+n = 45 # our square works for 45
 h = 1/n
 t = np.linspace(0.0,1.0,n)
-dt = 10**(-0) # 10**-1
-a = 0.25 # do not use a = 2, requires a slightly different model - investigate
+dt = 10**(-3) # 10**-1
+a = 2
+lda = 0.1
+
+debug = False
 
 
 # UTILS
 
-# NOTE - Consider using other numeric schemes for integration
 # finite element integration
 def feint_old(f,h,intrv):
     b = intrv[0]
@@ -146,8 +143,8 @@ def sgn(x):
     return 1
 
 class Viewport:
-    x = [-5.2,5.2]
-    y = [-5.2,5.2]
+    x = [-0.1,1.1]
+    y = [-0.1,1.1]
 viewport = Viewport()
 
 # finite difference |C'(t)|**2, needed?
@@ -177,6 +174,7 @@ def greenKernel(x,lda,l):
         ans = -(  m.cosh( (abs(x)-l/2)/(lda*l) )  )/( 2*lda*l*m.sinh(1/(2*lda)) )
     except:
         print("Error: Division by zero in the Greens kernel.\nVars: x = {}, lda = {}, l: {}".format(x,lda,l))
+        exit()
         ans = 0
     return ans
 
@@ -194,9 +192,11 @@ def convolution(f,offset,lda,l):
 def convolution2(u,v):
     output = np.zeros((n,2))
     for k in range(n):
-        for i in range(n):
+        for i in range(n-1): # n-1 seems to fix an issue with the boundary node being convolved twice
             output[k,0] += u[i,0]*v[k-i]
             output[k,1] += u[i,1]*v[k-i]
+            print("using convolution2 not self.convolution2")
+            print(0/0)
     return output
 
 ###########################
@@ -216,6 +216,8 @@ class fem:
         self.debug = debug
         self.A = np.zeros((2*n,2*n)) # 2 times for each set of nodal basis functions corresponding to x and y
         #self.generate_bilinear_form(regen=True) # set to true when changing bilinear form
+        self.updateDiscLengthVector()
+        self.generateGreensMatrix()
         self.generate_bilinear_form()
         #self.invA = la.inv(self.A)
         #self.area = self.getSignedArea()
@@ -227,7 +229,8 @@ class fem:
         return m.floor((x-self.interval[0])/self.h),m.ceil((x-self.interval[0])/self.h)
 
     def getLength(self):
-        length = m.sqrt((self.u0x[0]-self.u0x[n-1])**2 + (self.u0y[0]-self.u0y[n-1])**2)
+        # nodes 0 and n-1 should be the same value due to coupling
+        length = 0#m.sqrt((self.u0x[0]-self.u0x[n-1])**2 + (self.u0y[0]-self.u0y[n-1])**2)*0
         for i in range(n-1):
             length += m.sqrt((self.u0x[i]-self.u0x[i+1])**2 + (self.u0y[i]-self.u0y[i+1])**2)
         return length # scale for more interesting behaviour visually
@@ -243,6 +246,23 @@ class fem:
         for i in range(x-1):
             output += m.sqrt((self.u0x[i]-self.u0x[i+1])**2 + (self.u0y[i]-self.u0y[i+1])**2)
         return output
+    # Returns arclength distance between two nodes
+    def getDiscDist(self,a,b):
+        # sort a,b
+        if a > b:
+            c = b
+            b = a
+            a = c
+        output = 0
+        count = 0
+        for i in range(b-a):
+            if i==0 and b == n-1 and debug:
+                print(i+a)
+            count += 1
+            output += m.sqrt((self.u0x[i+a]-self.u0x[i+a+1])**2 + (self.u0y[i+a]-self.u0y[i+a+1])**2)
+        if debug:
+            print(count)
+        return output
 
     def convolution(self,lda,l):
         output = np.zeros((n,2))
@@ -255,6 +275,21 @@ class fem:
 
             output[j,0] = feint_old(lambda x: f(x)*greenKernel((self.getDiscCumLen(j)-t[j])*l,lda,l)*l,h,[0.0,1.0])[0]
             output[j,1] = feint_old(lambda x: g(x)*greenKernel((self.getDiscCumLen(j)-t[j])*l,lda,l)*l,h,[0.0,1.0])[0]
+        return output
+
+    def convolution2(self,u,l):
+        uhat = np.zeros((n,2))
+        for i in range(n):
+            uhat[i] = u[i] * self.avgArc(i)
+        output = np.zeros((n,2))
+        #for k in range(n):
+        #    for i in range(n-1): # n-1 seems to fix an issue with the boundary node being convolved twice
+        #        output[k,0] += u[i,0]*self.greensMatrix[k,i]
+        #        output[k,1] += u[i,1]*self.greensMatrix[k,i]
+        self.greensMatrix[:,n-1] = np.zeros(n)
+        self.greensMatrix[n-1,:] = np.zeros(n)
+        output = self.greensMatrix@(uhat)
+        output[n-1] = output[0]
         return output
 
     def generate_bilinear_forms_old(self, regen=False):
@@ -331,14 +366,44 @@ class fem:
         else:
             return 0
 
-    
+
+    def updateDiscLengthVector(self):
+        self.discLengths = np.zeros(n-1)
+        for i in range(n-1):
+            self.discLengths[i] = dist([self.u0x[i+1],self.u0y[i+1]],[self.u0x[i],self.u0y[i]])
+
+    def avgArc(self,i):
+        if i == 0 or i == n-1:
+            a = np.array([self.u0x[1],self.u0y[1]])
+            b = np.array([self.u0x[0],self.u0y[0]])
+            c = np.array([self.u0x[n-2],self.u0y[n-2]])
+        else:
+            a = np.array([self.u0x[i-1],self.u0y[i-1]])
+            b = np.array([self.u0x[i],self.u0y[i]])
+            c = np.array([self.u0x[i+1],self.u0y[i+1]])
+        return (dist(a,b)+dist(b,c))/2
+
+    def getDiscDist(self,a,b):
+        output = 0
+        if a > b:
+            c = a
+            a = b
+            b = c
+        for i in range(b-a):
+            output += self.discLengths[i+a]
+        return output
+
+    def generateGreensMatrix(self):
+        self.greensMatrix = np.zeros((n,n))
+        for i in range(n):
+            for j in range(n):
+                self.greensMatrix[i,j] = greenKernel(self.getDiscDist(i,j),lda,self.getLength()) #*self.getDiscDist(i,j)
 
 
     # generates the x and y bilinear forms according to current data
     def generate_bilinear_form(self):
         nodes = t
         self.A = np.zeros((2*n,2*n))
-        lda = 0.5
         l = self.getLength()
         for i in range(n):
             # This object is needed for the Simpsons rule
@@ -351,10 +416,13 @@ class fem:
             u0 = np.zeros((n,2))
             u0[:,0] = phiArray#self.u0x
             u0[:,1] = phiArray#self.u0y
-            for k in range(n):
-                greensArray[k] = greenKernel(l/n*k,lda,l)
+            #for k in range(n):
+                # We need an expression for the arclength distance
+                #sigmax = self.getDiscCumLen(k+1)
+                #greensArray[k] = greenKernel((1/n)*k*0+sigmax,lda,l)
             greensArray*=1 # scale by l
-            rowConvolution = convolution2(u0,greensArray)
+            #rowConvolution = convolution2(u0,greensArray)
+            rowConvolution = self.convolution2(u0,l)
             for j in range(n):
                 notlocal = True
                 # The convolution makes this no longer just local
@@ -386,8 +454,8 @@ class fem:
                         print("(0,0)  -->  G:{},phi:{}".format(simpsonint(j,rowConvolution),simpsonint(j,phiArray)))
 
         # apply periodic boundary conditions:
-        self.A[0,:] = self.A[0,:] + self.A[n-1,:]
-        self.A[n,:] = self.A[n,:] + self.A[2*n-1,:]
+        self.A[0,:] = (self.A[0,:] + self.A[n-1,:])
+        self.A[n,:] = (self.A[n,:] + self.A[2*n-1,:])
         # Use last row (now put into first) to enforce the end terms matching
         self.A[n-1,:] = np.zeros(2*n)
         self.A[2*n-1,:] = np.zeros(2*n)
@@ -400,6 +468,8 @@ class fem:
     # NOTE try and find and organise subroutines
     # Main FEM routine
     def solve(self):
+        self.updateDiscLengthVector()
+        self.generateGreensMatrix()
         global t
         # parameter space (usually denoted t).
         #x = np.linspace(interval[0]*m.pi,interval[1]*m.pi,1000)
@@ -519,12 +589,15 @@ class fem:
         u0[:,1] = U[n:2*n]
 
         # keep the curve centered
-        u0[:,0] -= np.mean(u0[:,0])
-        u0[:,1] -= np.mean(u0[:,1])
+        #u0[:,0] -= np.mean(u0[:,0])
+        #u0[:,1] -= np.mean(u0[:,1])
         
-        ru0 = reparam(u0)
-        self.u0x = ru0[:,0]
-        self.u0y = ru0[:,1]
+        #ru0 = reparam(u0)
+        #self.u0x = ru0[:,0]
+        #self.u0y = ru0[:,1]
+
+        self.u0x = u0[:,0]
+        self.u0y = u0[:,1]
         
         #print(U)
         #print(F)
@@ -585,7 +658,14 @@ u0y = 2*np.sin(2*m.pi*t)+2*np.sin(4*m.pi*t)#+0.1*np.cos(16*m.pi*t)#+0.4*np.sin(4
 circlex = np.cos(2*m.pi*t)
 circley = np.sin(2*m.pi*t)
 
-useSquare = False
+
+useSpiral = False
+useSquare = True
+useCircle = False
+
+if useCircle:
+    u0x = circlex
+    u0y = circley
 if useSquare:
     i = 0
     u0x[i] = 0
@@ -607,10 +687,30 @@ if useSquare:
 
     print(u0x[23:33])
 
-    u0x *= 4
-    u0y *= 4
+elif useSpiral:
+    C1 = lambda x: np.array(m.sqrt(4*m.pi*x)*np.array([m.cos(4*m.pi*x),m.sin(4*m.pi*x)]))
+    C2 = lambda x: np.array(-m.sqrt(3*m.pi*(1-x))*np.array([m.cos(3*m.pi*(1-x)),m.sin(3*m.pi*(1-x))]))
+    C3 = lambda x: ((C1(1)[0]-C2(0)[0])*np.array([m.cos(m.pi*x),m.sin(m.pi*x)]) + (C1(1)+C2(0)))/2
+    #spiral = np.array(map(lambda x: C1(x/0.49) if x <= 0.49 else C3((x-0.49)/0.02) if x <= 0.51 else C2((x-0.51)/0.49),t))
 
-    print(u0x)
+    # transforms the 3 curves to fit a piecewise 0-1 parameter space and line up smoothly. We can move the splitter values
+    # to change how many points each of the parts gets though if a reparam by arclength is done later this will matter but not as much
+    def spiral(x):
+        if x <= 0.49:
+            return C1(x/0.49)
+        elif x <= 0.51:
+            return C3((x-0.49)/0.02)
+        else:
+            return C2((x-0.51)/0.49)
+
+    for i in range(n):
+        u0x[i] = spiral(t[i])[0]
+        u0y[i] = spiral(t[i])[1]
+    # we do spiral
+
+# We do some scaling
+#u0x *= 4
+#u0y *= 4
 
 #i += 1
 #while (i < 10):
@@ -634,6 +734,9 @@ if useSquare:
 #u0x *= 4
 #u0y *= 4
 
+#u0x = np.sin(2*m.pi*t)+np.ones(n)*2
+#u0y = 8*t*(1-t)
+
 def heatFx(i):
     #return (u0x[i]-1)/dt # t should be u
     return u0x[i]/dt
@@ -647,7 +750,8 @@ def heatFy(i):
 classicfem = fem(h,[0.0,1.0],[1.0,1.0],heatFx,u0x,u0y,debug=False)
 
 curve = ax.plot(u0x,u0y,'-',label="FEM")[0]
-#circle = ax.plot(circlex,circley,label="true solution")[0]
+if useCircle:
+    circle = ax.plot(circlex,circley,label="true solution")[0]
 ax.legend()
 gifout = animation.ImageMagickFileWriter(fps=10)
 gifout.setup(fig,"output_sobolev.gif")
@@ -678,6 +782,7 @@ gifout.setup(fig,"output_sobolev.gif")
 #for i in range(5000):
 #    phity[i] = heatfemx.phi(phit[i])
 #ax.plot(phit,phity,label="phi")
+#fig.show() useful for plotting the starting curve
 def update(frame):
     global t
     t,ux = heatfemx.solve()
@@ -694,7 +799,7 @@ def update(frame):
     #curve.set_xdata(ux)
     #curve.set_ydata(uy)
 
-    uxc.set_ydata(ux)
+    #uxc.set_ydata(ux)
     #uyc.set_ydata(uy)
 
     #debugcurve.set_xdata(t+np.cos(frame))
@@ -717,51 +822,58 @@ gifout.grab_frame()
 frame = 0
 print("length init: {}".format(len(u0x)))
 for i in range(100):
-    print("\n--------\nComputing Frame: {}".format(frame))
     #update(i)
     #t,ux = heatfemx.solve()
     #t,uy = heatfemy.solve()Though, we've used convolutions before on models which are local, any chance we can model the flow without the Greens function and kernel?
 
     t,ux,uy = classicfem.solve()
+    if i%1==0: # for more steps with less frames in gif
+        print("\n--------\nComputing Frame: {}".format(frame))
+        print("Foo")
+        debug = True
+        print(classicfem.getDiscDist(0,n-1))
+        debug = False
 
-    print("lengths: {},{}".format(len(ux),len(uy)))
- 
-    #ux = t
-    #uy = t
-    #print("silliest billy")
-    #input("safety: ")
+        print("lengths: {},{}".format(len(ux),len(uy)))
+     
+        #ux = t
+        #uy = t
+        #print("silliest billy")
+        #input("safety: ")
 
-    #print(u0y[7])
-    #print(uy[7])
-    #u0x = ux
-    #u0y = uy
+        #print(u0y[7])
+        #print(uy[7])
+        #u0x = ux
+        #u0y = uy
 
-    #print(ux)
-    curve.set_xdata(ux)
-    curve.set_ydata(uy)
+        #print(ux)
+        curve.set_xdata(ux)
+        curve.set_ydata(uy)
 
-    #r0 = 1 # initial radius
-    #a = 0 # investigate, ask Glen
-    #lda = 1
-    # assuming a!=2
-    #b = ((2*m.pi)**a)/(1+(2*m.pi*lda)**2)
-    #radius = (r0**(2-a) - (2-a)*b*i*dt*1000)**(1/(2-a))
-    #circle.set_xdata(circlex*radius)
-    #circle.set_ydata(circley*radius)
-    #print("True Solution Radius: {}".format(radius))
+        if useCircle:
+            r0 = 1 # initial radius
+            #a = 0.05 # investigate, ask Glen
+            #lda = 1 # just use global def to keep same with FEM
+            # assuming a!=2
+            b = ((2*m.pi)**a)/(1+(2*m.pi*lda)**2)
+            radius = (r0**(2-a) - (2-a)*b*(i+1)*dt)**(1/(2-a))
+            circle.set_xdata(circlex*radius)
+            circle.set_ydata(circley*radius)
+            print("True Solution Radius: {}".format(radius))
+            print("True Solution Length: {}".format(radius*2*m.pi))
 
-    #uxc.set_ydata(ux)
-    #benchmark.set_ydata(np.exp(-dt*(frame+1))*(np.cos(2*np.pi*t)))
-    #phitest.set_ydata(phi_a(t-frame/31))
-    #uyc.set_ydata(uy)
+        #uxc.set_ydata(ux)
+        #benchmark.set_ydata(np.exp(-dt*(frame+1))*(np.cos(2*np.pi*t)))
+        #phitest.set_ydata(phi_a(t-frame/31))
+        #uyc.set_ydata(uy)
 
-    #debugcurve.set_xdata(t+np.cos(frame))
-    #debugcurve.set_ydata(t+np.sin(frame))
+        #debugcurve.set_xdata(t+np.cos(frame))
+        #debugcurve.set_ydata(t+np.sin(frame))
 
 
-    gifout.grab_frame()
-    #print(u0y[7])
-    frame+=1
+        gifout.grab_frame()
+        #print(u0y[7])
+        frame+=1
 gifout.finish()
 print("foo")
 #print(heatfemy.u0[7])
